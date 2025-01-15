@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Simplified CloudFormation template for a law firm project with OpenVPN integration."
+
+Parameters:
+  VpcName:
+    Type: String
+    Default: "LawFirmVPC"
+    Description: "The name of the VPC."
+  CidrBlock:
+    Type: String
+    Default: "10.0.0.0/24"  # Replace with manually allocated CIDR
+    Description: "The CIDR block for the VPC."
+  InstanceKeyName:
+    Type: String
+    Default: "2xKeyPair"
+    Description: "The name of the EC2 key pair to use for SSH access."
+
+Resources:
+  # VPC
+  LawFirmVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CidrBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref VpcName
+
+  # Public Subnet
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LawFirmVPC
+      CidrBlock: "10.0.0.0/25"  # Fixed CIDR for public subnet
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  # Private Subnet
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LawFirmVPC
+      CidrBlock: "10.0.0.128/25"  # Fixed CIDR for private subnet
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: "LawFirmIGW"
+
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LawFirmVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LawFirmVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # NAT Gateway for Private Subnet
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      AllocationId: !GetAtt ElasticIP.AllocationId
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LawFirmVPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # OpenVPN EC2 Instance
+  OpenVPNServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref InstanceKeyName
+      SubnetId: !Ref PublicSubnet
+      ImageId: "ami-0e2c8caa4b6378d8c"  # Replace with the desired Ubuntu AMI ID
+      SecurityGroupIds:
+        - !Ref OpenVPNSecurityGroup
+      Tags:
+        - Key: Name
+          Value: "OpenVPNServer"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install -y openvpn easy-rsa
+          make-cadir /etc/openvpn/easy-rsa
+          cd /etc/openvpn/easy-rsa
+          ./easyrsa init-pki
+          ./easyrsa build-ca nopass
+          ./easyrsa gen-dh
+          ./easyrsa gen-req server nopass
+          ./easyrsa sign-req server server
+          cp pki/ca.crt pki/private/server.key pki/issued/server.crt /etc/openvpn
+          systemctl start openvpn@server
+          systemctl enable openvpn@server
+
+  OpenVPNSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for OpenVPN server"
+      VpcId: !Ref LawFirmVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0  # SSH access
+        - IpProtocol: udp
+          FromPort: 1194
+          ToPort: 1194
+          CidrIp: 0.0.0.0/0  # OpenVPN port
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+Outputs:
+  VPCID:
+    Description: "The ID of the created VPC."
+    Value: !Ref LawFirmVPC
+
+  PublicSubnetID:
+    Description: "The ID of the public subnet."
+    Value: !Ref PublicSubnet
+
+  PrivateSubnetID:
+    Description: "The ID of the private subnet."
+    Value: !Ref PrivateSubnet
+
+  OpenVPNServerPublicIP:
+    Description: "Public IP of the OpenVPN server."
+    Value: !GetAtt OpenVPNServer.PublicIp
